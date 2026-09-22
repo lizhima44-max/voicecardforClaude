@@ -53,6 +53,16 @@
     display:flex;align-items:center;justify-content:center;transition:transform .12s}
   .dl:active{transform:scale(.88)}
   .dl svg{width:11px;height:11px;display:block}
+  .dl.open{background:var(--rose);color:#fff}
+  /* 展开的链接行：沙箱拦下载时的兜底出口 */
+  .urlRow{display:none;align-items:center;gap:5px;margin-top:6px}
+  .urlRow.show{display:flex}
+  .urlRow input{flex:1;min-width:0;font-size:10px;padding:3px 6px;border-radius:7px;
+    border:1px solid var(--edge);background:var(--track);color:var(--ink);
+    font-family:inherit;outline:none}
+  .urlRow button{flex:none;font-size:10px;padding:3px 8px;border:0;border-radius:7px;
+    cursor:pointer;background:var(--rose);color:#fff;font-family:inherit;white-space:nowrap}
+  .urlRow button:active{transform:scale(.92)}
 </style>
 </head>
 <body>
@@ -68,6 +78,10 @@
     </div>
     <div class="wave" id="wave"></div>
     <div class="time" id="time">0:00 / 0:00</div>
+    <div class="urlRow" id="urlRow">
+      <input id="urlIn" readonly aria-label="语音链接">
+      <button id="cp" type="button">复制</button>
+    </div>
   </div>
 </div>
 <!-- 降级用的 <audio>：Web Audio 不可用时才会被启用 -->
@@ -197,13 +211,56 @@ au.addEventListener("ended",function(){playing=false;btn.className="play";au.cur
 au.addEventListener("timeupdate",paint);
 au.addEventListener("loadedmetadata",paint);
 
-/* 下载按钮：必须是裸 <a href download>。
-   曾经用 JS 造 blob + a.click() 触发下载，被沙箱 iframe 拦掉
-   （iframe 没有 allow-downloads），点了完全没反应。裸链接 + target=_blank
-   最皮实：新标签页打开音频，用户自己另存。 */
+/* ── 下载：宿主 iframe 的 sandbox 决定了你能做什么 ──────────────
+   实测四种组合（结论别靠猜，自己也可以复现）：
+
+     sandbox                                    点下载的结果
+     allow-scripts                              什么都不发生，连报错都没有
+     + allow-popups                             开新标签页（不是下载）
+     + allow-same-origin（无 downloads）         静默失败
+     + allow-downloads                          才真的下载
+
+   为什么两头堵：跨域时浏览器**忽略** download 属性，退化成普通导航，
+   要 allow-popups；同源时 download 属性生效、走下载路径，要 allow-downloads。
+   JS 造 blob + a.click() 更早就被拦，那条路根本不用试。
+
+   所以这里做双保险：原生 <a> 的行为照留（宿主给了权限就正常开新标签），
+   同时**就地把完整链接展开出来**，一键复制——粘到浏览器里打开谁都拦不住。 */
+var urlRow=document.getElementById("urlRow"),urlIn=document.getElementById("urlIn"),
+    cpBtn=document.getElementById("cp"),cpTimer=0;
+
 dlBtn.addEventListener("click",function(ev){
   ev.stopPropagation();
-  if(!dlBtn.getAttribute("href"))ev.preventDefault();
+  var href=dlBtn.getAttribute("href");
+  if(!href){ev.preventDefault();return;}
+  urlIn.value=href;
+  urlRow.className=urlRow.className.indexOf("show")<0?"urlRow show":"urlRow";
+  dlBtn.className=urlRow.className.indexOf("show")<0?"dl":"dl open";
+  fit();                       /* 高度变了，重算一次，别出滚动条 */
+  /* 故意不 preventDefault：宿主若允许弹窗，新标签页照开 */
+});
+
+function flash(msg){
+  cpBtn.textContent=msg;
+  clearTimeout(cpTimer);
+  cpTimer=setTimeout(function(){cpBtn.textContent="复制";},1600);
+}
+
+cpBtn.addEventListener("click",function(ev){
+  ev.stopPropagation();
+  urlIn.focus();urlIn.select();
+  try{urlIn.setSelectionRange(0,99999);}catch(e){}   /* iOS 要这句才真选中 */
+  var ok=false;
+  try{ok=document.execCommand("copy");}catch(e){}
+  if(ok){flash("已复制");return;}
+  /* execCommand 被禁时再试异步 API。它在 iframe 里常被 permissions policy
+     拦掉，所以放第二位而不是第一位。 */
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(urlIn.value).then(
+      function(){flash("已复制");},function(){flash("请长按复制");});
+    return;
+  }
+  flash("请长按复制");
 });
 
 /* ── 取音频：三档降级 ─────────────────────────────────────────
@@ -251,8 +308,11 @@ function useElement(src,autoplay){
 function render(d){
   if(!d)return;
   if(d.label)lab.textContent=d.label;
-  if(d.audio&&/^https?:/i.test(d.audio))dlBtn.href=d.audio;
+  if(d.audio&&/^https?:/i.test(d.audio)){dlBtn.href=d.audio;dlBtn.style.display="";}
   else if(d.audio)dlBtn.style.display="none";     /* data: URI 没法当下载链接 */
+  if(d.audio&&d.audio!==urlIn.value){             /* 换了新语音就收起旧链接 */
+    urlRow.className="urlRow";dlBtn.className="dl";
+  }
   if(d.audio&&d.audio!==currentUrl){
     currentUrl=d.audio;
     loadAudio(d.audio,!!d.autoplay);

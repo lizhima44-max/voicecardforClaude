@@ -386,7 +386,7 @@ claude mcp add --transport http 语音条 https://你的地址/mcp \
 | `421 Invalid Host` | SDK 的 DNS-rebinding 防护把外部域名全拦了 | 代码里已经关掉（`enable_dns_rebinding_protection=False`）。自己改代码时别手贱加回去 |
 | 工具**在列表里但调不动**、动不动超时，连 `tools/list` 都卡 | 同步工具直接跑在事件循环主线程上，TTS 等网络那几秒整台服务器对所有请求装聋 | 代码里的「补丁一」——把同步工具丢线程池。这是最难自己想到的一个坑 |
 | 改了 `voice_card.html`，客户端还在渲染旧版 | 连接器按 URI 缓存了卡片壳子 | 升一个版本号 URI（`ui://voice-card-v2`），**同时保留旧 URI 做别名**返回同一份 HTML |
-| 点下载图标**完全没反应** | 用 JS 造 blob + `a.click()` 触发下载，被沙箱 iframe 拦了（iframe 没有 `allow-downloads`） | 用裸 `<a href download target="_blank">`，最皮实 |
+| 点下载图标**完全没反应** | 宿主 iframe 的 sandbox 两头堵：跨域时浏览器忽略 `download` 属性、退化成导航，要 `allow-popups`；同源时属性生效、走下载路径，要 `allow-downloads`。两个都没给就静默失败，连报错都没有 | 别在 iframe 里较劲。卡片已经做了兜底：点下载**就地展开完整链接 + 一键复制**，粘到浏览器里打开。详见下面的沙箱对照表 |
 | 卡片里出现滚动条 / 高度被截断 | iframe 按内容高度给位置 | 卡片里的 `fit()` 已经处理：整体缩放 + 把 `body` 高度贴死 |
 | 调用返回 401 | token 不对 | 请求头必须是 `Authorization: Bearer <token>`，注意 `Bearer` 后面一个空格 |
 | 火山 TTS 报错码非 3000 | ①`Authorization` 少了那个**分号**（要 `Bearer;<token>`，不是 `Bearer <token>`） ②声音复刻 1.0 的音色不支持情感参数 ③集群填错（复刻音色用 `volcano_icl`，预置音色用 `volcano_tts`） | 按左边三条挨个查 |
@@ -399,6 +399,29 @@ claude mcp add --transport http 语音条 https://你的地址/mcp \
 1. **Console** 标签——卡片里有 `console.warn`，会明确告诉你是 fetch 失败还是解码失败
 2. **Network** 标签——看那条 mp3 请求：红色 `(blocked:csp)` 就是白名单没配对
 3. 直接把 mp3 地址粘进地址栏——能播说明服务器没问题，纯粹是卡片被拦
+
+### 下载按钮为什么这么难
+
+这是实测四种 sandbox 组合的结果（自己复现：写个宿主页面，用不同 `sandbox`
+属性嵌入卡片，点一下看会发生什么）：
+
+| iframe sandbox | 点下载的结果 |
+|---|---|
+| `allow-scripts` | **什么都不发生**，连报错都没有 |
+| `+ allow-popups` | 开新标签页（但不是下载） |
+| `+ allow-same-origin`（无 downloads） | 静默失败 |
+| `+ allow-downloads` | 才真的下载 |
+
+两头堵的原因：**跨域**时浏览器忽略 `download` 属性、退化成普通导航，需要
+`allow-popups`；**同源**时 `download` 属性生效、走下载路径，需要
+`allow-downloads`。宿主给哪个权限你说了不算。
+
+所以这份卡片不在 iframe 里较劲：点下载**就地展开完整链接**，带一键复制，
+粘到浏览器里打开就行。原生 `<a>` 的行为也保留着——宿主给了权限就正常开新标签。
+
+> 想让浏览器打开链接时**直接下载**而不是播放，在音频服务器上给那个路径加
+> `Content-Disposition: attachment` 响应头即可（Nginx：
+> `add_header Content-Disposition 'attachment';`）。
 
 ---
 

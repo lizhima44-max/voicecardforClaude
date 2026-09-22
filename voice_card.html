@@ -1,0 +1,302 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  /* ── 配色：亮色 / 暗色两套，跟随系统，也支持宿主用 data-theme 强制 ── */
+  :root{
+    --card1:#ffe3da; --card2:#f9c7ba; --edge:#f2b3a3; --ink:#7a3b2e;
+    --btn1:#ffb3a0; --btn2:#f0876c; --rose:#e8836a; --sub:#b47c6c;
+    --track:rgba(255,255,255,.55);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--card1:#3d1f18;--card2:#2e1710;--edge:#5a2f24;--ink:#f6d0c4;
+      --btn1:#c96b52;--btn2:#a3492f;--rose:#f0a58e;--sub:#c79a8c;--track:rgba(255,255,255,.15);}
+  }
+  :root[data-theme="dark"]{--card1:#3d1f18;--card2:#2e1710;--edge:#5a2f24;--ink:#f6d0c4;
+    --btn1:#c96b52;--btn2:#a3492f;--rose:#f0a58e;--sub:#c79a8c;--track:rgba(255,255,255,.15);}
+  :root[data-theme="light"]{--card1:#ffe3da;--card2:#f9c7ba;--edge:#f2b3a3;--ink:#7a3b2e;
+    --btn1:#ffb3a0;--btn2:#f0876c;--rose:#e8836a;--sub:#b47c6c;--track:rgba(255,255,255,.55);}
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{overflow:hidden}                 /* 卡片在 iframe 里，绝不能出滚动条 */
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:transparent}               /* 透明背景，融进宿主的气泡 */
+
+  .bar{display:flex;align-items:center;gap:13px;width:320px;max-width:100%;margin:0 auto;
+    padding:12px 16px;border-radius:22px;overflow:hidden;
+    background:linear-gradient(150deg,var(--card1),var(--card2));border:1px solid var(--edge);
+    box-shadow:0 10px 26px rgba(180,90,60,.22),inset 0 1px 0 rgba(255,255,255,.4)}
+
+  /* 播放按钮：CSS 三角形当"播放"，两根竖条当"暂停"，不用图标字体也不用图片 */
+  .play{flex:none;width:46px;height:46px;border-radius:50%;border:0;cursor:pointer;position:relative;
+    background:radial-gradient(120% 120% at 50% 30%,var(--btn1),var(--btn2));
+    box-shadow:0 4px 10px rgba(180,90,60,.28);transition:transform .12s}
+  .play:active{transform:scale(.92)}
+  .play::before{content:"";position:absolute;top:50%;left:53%;transform:translate(-50%,-50%);
+    width:0;height:0;border-left:15px solid #fff;border-top:9px solid transparent;border-bottom:9px solid transparent}
+  .play.playing::before{border:0;width:13px;height:13px;left:50%;
+    background:linear-gradient(90deg,#fff 0 34%,transparent 34% 66%,#fff 66%)}
+
+  .mid{flex:1;min-width:0}
+  .lab{font-size:13.5px;color:var(--ink);font-weight:700;letter-spacing:.2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wave{display:flex;align-items:center;gap:3px;height:20px;margin:7px 0 5px;cursor:pointer}
+  .wave i{flex:1;background:var(--track);border-radius:2px;transition:background .1s;min-width:2px}
+  .wave i.on{background:var(--rose)}
+  .time{font-size:11px;color:var(--sub);font-variant-numeric:tabular-nums}
+  .labRow{display:flex;align-items:center;gap:6px}
+  .labRow .lab{flex:1}
+  .dl{flex:none;width:19px;height:19px;border:0;border-radius:50%;cursor:pointer;
+    background:var(--track);color:var(--ink);text-decoration:none;
+    display:flex;align-items:center;justify-content:center;transition:transform .12s}
+  .dl:active{transform:scale(.88)}
+  .dl svg{width:11px;height:11px;display:block}
+</style>
+</head>
+<body>
+<div class="bar" id="bar">
+  <button class="play" id="play" aria-label="播放"></button>
+  <div class="mid">
+    <div class="labRow">
+      <div class="lab" id="lab">语音消息</div>
+      <a class="dl" id="dl" aria-label="下载" title="保存到本地" target="_blank"
+         rel="noopener" download><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/>
+         <path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg></a>
+    </div>
+    <div class="wave" id="wave"></div>
+    <div class="time" id="time">0:00 / 0:00</div>
+  </div>
+</div>
+<!-- 降级用的 <audio>：Web Audio 不可用时才会被启用 -->
+<audio id="au" preload="metadata" style="display:none"></audio>
+<script>
+/* ===========================================================================
+ * 语音条卡片（MCP UI / ext-apps widget）
+ *
+ * 宿主（claude.ai / ChatGPT 等）把这个文件塞进一个沙箱 iframe，然后用
+ * postMessage 把工具返回的 structuredContent 发进来。我们要做的事只有三件：
+ *   1) 握手：告诉宿主"我准备好了"（ui/initialize + initialized）
+ *   2) 收数据：监听 message，拿到 {audio, label, autoplay}
+ *   3) 放声音：三档降级去播（见下面 loadAudio 的注释）
+ *
+ * ⚠️ 为什么不直接 <audio src="https://.../x.mp3"> ？
+ *    沙箱 iframe 的 CSP 常把 media-src 掐死，跨域 mp3 直接赋给 <audio src>
+ *    会静默失败（表现为"加载失败"、点了没反应）。而 connect-src（fetch）
+ *    通常更宽松。所以正确姿势是：fetch 拿字节 → 本地播。
+ * =========================================================================== */
+
+var btn=document.getElementById("play"),lab=document.getElementById("lab"),
+    wave=document.getElementById("wave"),timeEl=document.getElementById("time"),
+    dlBtn=document.getElementById("dl"),au=document.getElementById("au");
+
+var BARS=22,bars=[];
+/* 静态"波形"：高低固定的一排竖条，播放进度点亮。
+   真波形要解码后算 RMS，成本高、在小卡片上也看不出差别——这排装饰够用。 */
+var HS=[9,14,7,17,11,20,8,15,10,18,6,13,16,9,19,12,7,15,10,14,8,17];
+for(var i=0;i<BARS;i++){var b=document.createElement("i");
+  b.style.height=HS[i%HS.length]+"px";wave.appendChild(b);bars.push(b);}
+
+/* ── 播放状态机 ─────────────────────────────────────────────
+   两种后端：
+     mode="webaudio" → AudioContext + BufferSource（首选，完全不碰 media-src）
+     mode="element"  → <audio> + blob: URL（降级）
+   统一暴露 duration() / current() / startPlayback() / pausePlayback()      */
+var mode="webaudio";
+var audioCtx=null,audioBuffer=null,audioBytes=null,source=null;
+var playing=false,startedAt=0,offset=0,raf=0,currentUrl="",stopping=false;
+
+function fmt(s){s=Math.max(0,Math.floor(s||0));return Math.floor(s/60)+":"+("0"+(s%60)).slice(-2);}
+
+function duration(){
+  if(mode==="element")return isFinite(au.duration)?au.duration:0;
+  return audioBuffer?audioBuffer.duration:0;
+}
+function current(){
+  if(mode==="element")return au.currentTime||0;
+  var c=playing&&audioCtx?offset+(audioCtx.currentTime-startedAt):offset,d=duration();
+  return d?Math.min(c,d):c;
+}
+function paint(){
+  var d=duration(),c=current(),p=d?c/d:0,lit=Math.round(p*BARS);
+  for(var i=0;i<BARS;i++)bars[i].className=i<lit?"on":"";
+  timeEl.textContent=fmt(c)+" / "+fmt(d);
+  /* Web Audio 没有 timeupdate 事件，进度得自己用 rAF 推 */
+  if(playing&&mode==="webaudio")raf=requestAnimationFrame(paint);
+}
+
+function stopSource(){if(source){stopping=true;try{source.stop();}catch(e){}source=null;}}
+function finish(){playing=false;offset=0;source=null;btn.className="play";
+  cancelAnimationFrame(raf);paint();}
+
+/* 解码：decodeAudioData 不需要用户手势，所以拿到字节就先解，
+   这样时长能立刻显示出来，而不是等第一次点播放。
+   （只有 AudioContext.resume() 需要手势，那步留到点播放时做。）   */
+function ensureDecoded(){
+  if(audioBuffer)return Promise.resolve(audioBuffer);
+  if(!audioBytes)return Promise.reject(new Error("audio not loaded"));
+  var AC=window.AudioContext||window.webkitAudioContext;
+  if(!AC)return Promise.reject(new Error("Web Audio unsupported"));
+  if(!audioCtx)audioCtx=new AC();
+  /* slice(0)：decodeAudioData 会"吃掉"(detach) 传进去的 ArrayBuffer，
+     留个副本才能重复解码 */
+  return audioCtx.decodeAudioData(audioBytes.slice(0)).then(function(buf){
+    audioBuffer=buf;paint();return buf;
+  });
+}
+
+function startPlayback(){
+  if(mode==="element"){
+    var pr=au.play();
+    return (pr&&pr.then)?pr:Promise.resolve();
+  }
+  return ensureDecoded().then(function(){
+    return audioCtx.resume();          /* 用户点了按钮，此时 resume 合法 */
+  }).then(function(){
+    stopSource();stopping=false;
+    source=audioCtx.createBufferSource();
+    source.buffer=audioBuffer;
+    source.connect(audioCtx.destination);
+    startedAt=audioCtx.currentTime;
+    source.onended=function(){if(stopping){stopping=false;return;}finish();};
+    source.start(0,Math.min(offset,Math.max(0,audioBuffer.duration-.01)));
+    playing=true;btn.className="play playing";paint();
+  });
+}
+function pausePlayback(){
+  if(mode==="element"){au.pause();return;}
+  if(!playing)return;
+  offset=current();playing=false;btn.className="play";
+  cancelAnimationFrame(raf);stopSource();paint();
+}
+
+btn.addEventListener("click",function(){
+  if(playing){pausePlayback();return;}
+  startPlayback().catch(function(e){
+    lab.textContent="语音播放失败";btn.className="play";
+    console.warn("[voice-card] play failed:",e);
+  });
+});
+
+/* 点波形跳进度 */
+wave.addEventListener("click",function(ev){
+  var d=duration();if(!d)return;
+  var r=wave.getBoundingClientRect(),p=Math.max(0,Math.min(1,(ev.clientX-r.left)/r.width));
+  if(mode==="element"){au.currentTime=p*d;paint();return;}
+  var was=playing;if(was)pausePlayback();
+  offset=p*d;paint();
+  if(was)startPlayback().catch(function(){lab.textContent="语音播放失败";});
+});
+
+/* <audio> 降级模式的事件（webaudio 模式下这些不会触发） */
+au.addEventListener("play",function(){playing=true;btn.className="play playing";});
+au.addEventListener("pause",function(){playing=false;btn.className="play";});
+au.addEventListener("ended",function(){playing=false;btn.className="play";au.currentTime=0;paint();});
+au.addEventListener("timeupdate",paint);
+au.addEventListener("loadedmetadata",paint);
+
+/* 下载按钮：必须是裸 <a href download>。
+   曾经用 JS 造 blob + a.click() 触发下载，被沙箱 iframe 拦掉
+   （iframe 没有 allow-downloads），点了完全没反应。裸链接 + target=_blank
+   最皮实：新标签页打开音频，用户自己另存。 */
+dlBtn.addEventListener("click",function(ev){
+  ev.stopPropagation();
+  if(!dlBtn.getAttribute("href"))ev.preventDefault();
+});
+
+/* ── 取音频：三档降级 ─────────────────────────────────────────
+   ① fetch → ArrayBuffer → Web Audio 解码播放   ← 首选，不碰 media-src
+   ② fetch → blob: URL → <audio src>            ← Web Audio 不可用/解码失败
+   ③ 直接把远程 URL 赋给 <audio src>            ← 连 fetch 都被拦时的最后一搏
+   data: URI（base64 内嵌）走 ② 就够，不必 fetch。                        */
+function loadAudio(url,autoplay){
+  stopSource();playing=false;offset=0;audioBuffer=null;audioBytes=null;
+  mode="webaudio";btn.className="play";paint();
+
+  if(/^data:/i.test(url)){useElement(url,autoplay);return;}
+
+  fetch(url).then(function(r){
+    if(!r.ok)throw new Error("http "+r.status);
+    return r.arrayBuffer();
+  }).then(function(buf){
+    audioBytes=buf;
+    return ensureDecoded().then(function(){
+      if(autoplay)startPlayback().catch(function(){});
+    }).catch(function(e){
+      /* 解码失败（编码不被支持 / 没有 Web Audio）→ 降级 ② */
+      console.warn("[voice-card] decode failed, fallback to <audio>:",e);
+      var blobUrl=URL.createObjectURL(new Blob([buf],{type:"audio/mpeg"}));
+      useElement(blobUrl,autoplay);
+    });
+  }).catch(function(e){
+    /* fetch 被 CSP/CORS 拦 → 降级 ③ 直连 */
+    console.warn("[voice-card] fetch failed, fallback to direct src:",e);
+    useElement(url,autoplay);
+  });
+}
+
+function useElement(src,autoplay){
+  mode="element";
+  if(au.dataset.blobUrl){URL.revokeObjectURL(au.dataset.blobUrl);au.dataset.blobUrl="";}
+  if(/^blob:/i.test(src))au.dataset.blobUrl=src;
+  au.src=src;
+  au.onerror=function(){lab.textContent="语音加载失败";};
+  if(autoplay){var pr=au.play();if(pr&&pr.catch)pr.catch(function(){});}
+  paint();
+}
+
+/* ── 渲染：把工具返回的 structuredContent 铺到界面上 ── */
+function render(d){
+  if(!d)return;
+  if(d.label)lab.textContent=d.label;
+  if(d.audio&&/^https?:/i.test(d.audio))dlBtn.href=d.audio;
+  else if(d.audio)dlBtn.style.display="none";     /* data: URI 没法当下载链接 */
+  if(d.audio&&d.audio!==currentUrl){
+    currentUrl=d.audio;
+    loadAudio(d.audio,!!d.autoplay);
+  }
+  if(d.error)lab.textContent="✗ "+d.error;
+  fit();
+}
+
+/* 自适应：flex 条自己会伸缩，再按视口宽度整体缩放兜底，并把 body 高度
+   贴着卡片高度设死——宿主按内容高度给 iframe 留位置，永不出滚动条。 */
+function fit(){
+  var c=document.getElementById("bar");
+  c.style.transform="none";
+  var vw=document.documentElement.clientWidth||320;
+  var W=c.offsetWidth||320;
+  var s=Math.min(1.15,Math.max(0.5,(vw-6)/W));
+  c.style.transformOrigin="top center";
+  c.style.transform="scale("+s+")";
+  var h=Math.ceil(c.offsetHeight*s+8)+"px";
+  document.body.style.height=h;
+  document.documentElement.style.height=h;
+}
+window.addEventListener("resize",fit);
+
+/* ── 跟宿主的 postMessage 契约 ──
+   收：ui/notifications/tool-result 里的 params.structuredContent
+       （有的宿主直接发 {structuredContent:...}，两种都接）
+   发：ui/initialize（带 id，算一次请求）+ ui/notifications/initialized  */
+window.addEventListener("message",function(ev){
+  var msg=ev.data;if(!msg||typeof msg!=="object")return;
+  if(msg.jsonrpc==="2.0"&&msg.method==="ui/notifications/tool-result")
+    render(msg.params&&msg.params.structuredContent);
+  if(msg.structuredContent)render(msg.structuredContent);
+});
+function send(method,params,id){
+  var m={jsonrpc:"2.0",method:method,params:params||{}};
+  if(id!==undefined)m.id=id;
+  window.parent.postMessage(m,"*");
+}
+paint();fit();
+window.addEventListener("load",fit);
+setTimeout(fit,120);
+send("ui/initialize",{name:"voice-card",version:"1.0.0"},1);
+setTimeout(function(){send("ui/notifications/initialized",{});},50);
+</script>
+</body>
+</html>

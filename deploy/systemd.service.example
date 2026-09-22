@@ -1,0 +1,28 @@
+# 装到 /etc/systemd/system/voice-card.service，然后：
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now voice-card
+#   sudo journalctl -u voice-card -f        # 看日志
+
+[Unit]
+Description=voice-card-mcp
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/voice-card-mcp
+# 密钥放这个文件里（KEY=VALUE 一行一条），权限设 600，别塞进这个 service 文件
+EnvironmentFile=/opt/voice-card-mcp/.env
+ExecStart=/opt/voice-card-mcp/.venv/bin/python /opt/voice-card-mcp/server.py
+Restart=always
+RestartSec=3
+
+# 一点基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# 音频目录要可写，其余只读
+ReadWritePaths=/opt/voice-card-mcp/public
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+# /etc/nginx/sites-available/voice-card
+# 证书用 certbot 申请： sudo certbot --nginx -d voice.example.com
+
+server {
+    listen 443 ssl http2;
+    server_name voice.example.com;              # ← 改成你的域名
+
+    ssl_certificate     /etc/letsencrypt/live/voice.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/voice.example.com/privkey.pem;
+
+    # ── 音频：直接由 Nginx 托管，比经过 Python 快得多 ──
+    # alias 指向 AUDIO_DIR 的绝对路径，注意结尾那个斜杠不能少
+    location /audio/ {
+        alias /opt/voice-card-mcp/public/audio/;
+
+        # 🚨 这条必须有：卡片是从客户端的域名跨域来取音频的
+        add_header Access-Control-Allow-Origin  *;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS";
+        add_header Cache-Control "public, max-age=604800";
+
+        types { audio/mpeg mp3; }
+        default_type audio/mpeg;
+    }
+
+    # ── MCP 端点 ──
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 🚨 SSE / streamable HTTP 是长连接，这三条不能省，
+        #    否则连接会被缓冲住或者过一分钟就断
+        proxy_buffering off;
+        proxy_cache     off;
+        proxy_read_timeout 3600s;
+
+        # SSE 模式还需要这个
+        proxy_set_header Connection "";
+    }
+}
+
+server {
+    listen 80;
+    server_name voice.example.com;
+    return 301 https://$host$request_uri;
+}
